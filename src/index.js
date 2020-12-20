@@ -6,51 +6,79 @@ const http = require('http')
 const placeHolderRegExp = /\[([a-zA-Z0-9]+)]/g
 const urlRegExp = /^(?<prefix>(.*?\+)?)(?<protocol>(?:(.*?:\/\/)|(\/\/))?)(?:(?:(?<username>.*?)(?:[@:]))?)(?:(?:(?<password>.*?)@)?)(?:(?:(?<host>.*?)\/)?)(?:(?:(?<path>.*?)(?:[?#]|$))?)(?:(?:(?<query>.*?)(?:#|$))?)(?:(?:(?<fragment>.*?)$)?)$/
 const repositoryOwnerAndNameRegExp = /(?:\/|^)(?<owner>.*?)(?:\/|\.git|$)(?<name>.*?)(?:\/|\.git|$)/
-const readmeLicenseStartRegex = /(?:^[ ]*[#]+[ ]*license[ ]*(?:(?:\n[ ]*[\-]+)?)|^[ ]*license[ ]*\n[ ]*[\-])/mi
+const readmeLicenseStartRegex = /(?:^[ ]*[#]+(?:.*?)(?:license|licence)[ ]*(?:(?:\n[ ]*[\-]+)?)|^(?:.*?)(?:license|licence)[ ]*\n[ ]*[\-])/mi
 const readmeLicenseEndRegex = /(?:\s*[#]|^(?:.*?)\n[ ]*[\-]+)/m
 const dotPathRegExp = /^(?<path>(?:\.[\/\\]|\.\.[\/\\])*)/
 const supportedRepositories = new Set(['github.com', 'gitlab.com', 'bitbucket.org'])
 const branchVariants = ['master', 'main']
 const responseCache = {}
+const MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 1039
 
 
 const remoteLicenseFilePathVariants = [
   'LICENSE',
   'LICENSE.md',
   'LICENSE.txt',
-  'License',
-  'License.md',
-  'License.txt',
-  'license',
-  'license.md',
-  'license.txt',
-  'MIT.LICENSE',
-  'MIT.LICENSE.md',
-  'MIT.LICENSE.txt',
   'LICENCE',
   'LICENCE.md',
   'LICENCE.txt',
-  'Licence',
-  'Licence.md',
-  'Licence.txt',
-  'licence',
-  'licence.md',
-  'licence.txt',
+  'MIT.LICENSE',
+  'MIT.LICENSE.md',
+  'MIT.LICENSE.txt',
+  'LICENSE-MIT',
+  'LICENSE-MIT.md',
+  'LICENSE-MIT.txt',
+  'LICENCE',
+  'LICENCE.md',
+  'LICENCE.txt',
+  'LICENCE',
+  'LICENCE.md',
+  'LICENCE.txt',
   'MIT.LICENCE',
   'MIT.LICENCE.md',
   'MIT.LICENCE.txt',
+  'LICENCE-MIT',
+  'LICENCE-MIT.md',
+  'LICENCE-MIT.txt',
   'COPYING',
   'COPYING.md',
   'COPYING.txt',
-  'Copying',
-  'Copying.md',
-  'Copying.txt',
-  'copying',
-  'copying.md',
-  'copying.txt',
   'MIT.COPYING',
   'MIT.COPYING.md',
   'MIT.COPYING.txt',
+  'COPYING-MIT',
+  'COPYING-MIT.md',
+  'COPYING-MIT.txt',
+  'License',
+  'License.md',
+  'License.txt',
+  'Licence',
+  'Licence.md',
+  'Licence.txt',
+  'Licence',
+  'Licence.md',
+  'Licence.txt',
+  'Licence',
+  'Licence.md',
+  'Licence.txt',
+  'Copying',
+  'Copying.md',
+  'Copying.txt',
+  'license',
+  'license.md',
+  'license.txt',
+  'licence',
+  'licence.md',
+  'licence.txt',
+  'licence',
+  'licence.md',
+  'licence.txt',
+  'licence',
+  'licence.md',
+  'licence.txt',
+  'copying',
+  'copying.md',
+  'copying.txt',
 ]
 
 const remoteReadmeFilePathVariants = [
@@ -119,10 +147,7 @@ async function generateBundle({ dir, cacheDir = '.disclaimer', remote, reporting
     writeJsonFile(packageJsonCacheFilePath, packageJsonCache),
   ])
 
-  // const deps = [getPackageJsonDependencies(packageJson), ...packageJson.devDependencies]
-
   process.stdout.write('\r')
-  // console.log(JSON.stringify(packageInfos, void 0, 2))
 }
 
 async function resolvePackageInfo(root, context) {
@@ -140,9 +165,27 @@ async function resolvePackageInfo(root, context) {
   }
 
   if (lacksPackageJsonImportantInformation(packageJson)) {
+    let remotePackageJson = await resolvePackageJson({
+      root,
+      packageJson,
+      packageJsonCache: context.packageJsonCache,
+    })
+    let versionKeys
+
+    if (remotePackageJson
+      && !remotePackageJson.version
+      && remotePackageJson.versions
+      && (versionKeys = Object.keys(remotePackageJson.versions)).length === 1
+    ) {
+      remotePackageJson = {
+        ...remotePackageJson,
+        ...remotePackageJson.versions[versionKeys[0]],
+      }
+    }
+
     packageJson = {
       ...await resolveContainerPackageJson(root, packageJson),
-      ...await resolvePackageJson(packageJsonPath, packageJson, context),
+      ...remotePackageJson,
       ...packageJson,
     }
 
@@ -169,6 +212,7 @@ async function resolvePackageInfo(root, context) {
     repositoryUrl,
     urlTemplate: context.remote,
     cache: context.cache,
+    packageJsonCache: context.packageJsonCache,
   }
   const [licenseText, noticeText, thirdPartyNoticeText] = await Promise.all([
     searchForLicenseText(searchOptions),
@@ -216,13 +260,20 @@ async function searchForLicenseText(context) {
     searchForRemoteLicenseText, // @todo: Maybe, first search in repository directory - when specified in "repository".
     searchForContainerLicenseText,
     searchForLocalLicenseTextInReadme,
+    searchForRemotePackageJsonLicenseTextInReadme,
     searchForRemoteLicenseTextInReadme,
   ])
 }
 
 async function searchForCachedLicenseText({ id, cache }) {
-  if (cache.hasOwnProperty(id) && cache[id].licenseText) {
-    return cache[id].licenseText
+  if (cache.hasOwnProperty(id)) {
+    const licenseText = cache[id].licenseText
+
+    if (typeof licenseText === 'object' && licenseText.assembled) {
+      return null
+    }
+
+    return licenseText
   }
 }
 
@@ -231,6 +282,21 @@ async function searchForLocalLicenseText({ root }) {
 }
 
 async function searchForRemoteLicenseText(context) {
+  const { licenses } = context.packageJson
+
+  if (licenses && Array.isArray(licenses) && licenses.length === 1 && licenses[0].url) {
+    try {
+      const url = resolveLicenseUrl(licenses[0].url, context)
+      const licenseText = await request(url)
+
+      if (licenseText) {
+        return licenseText
+      }
+    } catch (e) {
+      console.log(e)
+    }
+  }
+
   return await searchForRemoteFileContent(
     branchVariants,
     remoteLicenseFilePathVariants,
@@ -239,15 +305,25 @@ async function searchForRemoteLicenseText(context) {
 }
 
 async function searchForLocalLicenseTextInReadme({ root }) {
-  return extractLicenseTextFromReadme(
+  return await resolveLicenseTextUsingReadme(
     await resolveContent(
       await searchForReadmeFiles(root)
     )
   )
 }
 
+async function searchForRemotePackageJsonLicenseTextInReadme(context) {
+  const packageJson = await resolveRemotePackageJson(context, true) // true means force-no-version
+
+  if (packageJson?.readme) {
+    return await resolveLicenseTextUsingReadme(packageJson?.readme)
+  }
+
+  return null
+}
+
 async function searchForRemoteLicenseTextInReadme(context) {
-  return extractLicenseTextFromReadme(
+  return await resolveLicenseTextUsingReadme(
     await searchForRemoteFileContent(
       branchVariants,
       remoteReadmeFilePathVariants,
@@ -327,43 +403,48 @@ async function searchForContainerThirdPartyNoticeText(context) {
 
 
 
-async function resolvePackageJson(packageJsonPath, packageJson, context) {
-  const cachedPackageJson = resolveCachedPackageJson(packageJsonPath, context)
+async function resolvePackageJson(context) {
+  const cachedPackageJson = resolveCachedPackageJson(context)
 
   if (cachedPackageJson) {
     return cachedPackageJson
   }
 
-  return resolveRemotePackageJson(packageJsonPath, packageJson, context)
+  return resolveRemotePackageJson(context)
 }
 
-function resolveCachedPackageJson(packageJsonPath, { packageJsonCache }) {
+function resolveCachedPackageJson({ root, packageJsonCache }) {
+  const packageJsonPath = path.join(root, 'package.json')
+
   if (packageJsonCache.hasOwnProperty(packageJsonPath)) {
     return packageJsonCache[packageJsonPath]
   }
+
+  return null
 }
 
 /**
  *
  * @param {string} packageJsonPath
- * @param {string} name
- * @param {string} version
  * @param packageJsonCache
+ * @param forceNoVersion
  * @returns {Promise<null|*>}
  */
-async function resolveRemotePackageJson(packageJsonPath, { name, version }, { packageJsonCache }) {
+async function resolveRemotePackageJson({ root, packageJson, packageJsonCache }, forceNoVersion) {
+  const { name, version } = packageJson
+  const packageJsonPath = path.join(root, 'package.json')
+
   if (!name || (name[0] !== '@' && name.includes('/'))) {
     return null
   }
 
   let url = `https://registry.npmjs.org/${name}`
 
-  if (version) {
+  if (forceNoVersion !== true && version) {
     url += `/${version}`
   }
 
   try {
-    console.log(url)
     const packageJson = JSON.parse(await request(url))
 
     if (packageJson) {
@@ -374,6 +455,28 @@ async function resolveRemotePackageJson(packageJsonPath, { name, version }, { pa
   } catch (e) {
     return null
   }
+}
+
+function resolveLicenseUrl(url, { packageJson, urlTemplate }) {
+  if (!urlTemplate) {
+    return url
+  }
+
+  const { host, path } = parseUrl(url)
+
+  if (host !== 'github.com' || !path) {
+    return url
+  }
+
+  const [owner, name, _, branch, ...pathSegments] = trimLeft(path, '/').split('/')
+
+  return replacePlaceholdersWithValues(urlTemplate, {
+    packageName: packageJson.name,
+    repositoryOwner: owner,
+    repositoryName: name,
+    branch: branch,
+    filePath: pathSegments.join('/'),
+  })
 }
 
 async function searchForRemoteFileContent(branchVariants, pathVariants, {
@@ -425,16 +528,6 @@ function resolveRepositoryUrl(packageJson) {
   }
 
   return null
-}
-
-async function resolveRemoteRepositoryUrl(packageJson) {
-  try {
-    const remotePackageJson = await resolveRemotePackageJson(packageJson.name, packageJson.version)
-
-    return remotePackageJson?.repository?.url ?? null
-  } catch (e) {
-    return null
-  }
 }
 
 function includesSupportedRepositoryHost(url) {
@@ -1016,10 +1109,33 @@ function parseArguments(args) {
  *
  * @param {string} readme
  *
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function extractLicenseTextFromReadme(readme) {
-  return readme.split(readmeLicenseStartRegex)[1]?.split(readmeLicenseEndRegex)[0]?.trim() ?? ''
+async function resolveLicenseTextUsingReadme(readme) {
+  const licenseText = readme
+    .split(readmeLicenseStartRegex)[1]
+    ?.split(readmeLicenseEndRegex)[0]
+    ?.trim()
+
+  if (!licenseText) {
+    return ''
+  }
+
+  if (isPossiblyAnMITCopyright(licenseText)) {
+    return {
+      assembled: true,
+      text: replacePlaceholdersWithValues(await readFile(path.join(__dirname, 'templates/MIT.template')), {
+        copyright: licenseText,
+      }).trim(),
+    }
+  }
+
+  return licenseText
+}
+
+function isPossiblyAnMITCopyright(text) {
+  return text.toUpperCase().includes('MIT')
+    && text.length < MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
 }
 
 function replacePlaceholdersWithValues(template, parameters) {
