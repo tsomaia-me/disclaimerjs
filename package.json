@@ -2,6 +2,7 @@
   "name": "disclaimerjs",
   "description": "A CLI tool to bundle dependency licenses and notices into a single file.",
   "version": "1.0.0",
+  "license": "MIT-0",
   "type": "commonjs",
   "author": {
     "name": "Tornike Tsomaia",
