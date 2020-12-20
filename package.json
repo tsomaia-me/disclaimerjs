@@ -13,8 +13,5 @@
     "url": "https://gitlab.com/tsomaia.me/disclaimerjs.git"
   },
   "dependencies": {},
-  "devDependencies": {
-    "license-report": "^4.3.0",
-    "typescript": "^4.1.3"
-  }
+  "devDependencies": {}
 }
