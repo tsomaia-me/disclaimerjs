@@ -1,0 +1,19 @@
+{
+  "name": "disclaimerjs",
+  "description": "A CLI tool to bundle dependency licenses and notices into a single file.",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "author": {
+    "name": "Tornike Tsomaia",
+    "email": "tsomaia.me@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "license-report": "^4.3.0",
+    "typescript": "^4.1.3"
+  }
+}
