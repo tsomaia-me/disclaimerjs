@@ -9,9 +9,10 @@ const repositoryOwnerAndNameRegExp = /(?:\/|^)(?<owner>.*?)(?:\/|\.git|$)(?<name
 const readmeLicenseStartRegex = /(?:^[ ]*[#]+(?:.*?)(?:license|licence)[ ]*(?:(?:\n[ ]*[\-]+)?)|^(?:.*?)(?:license|licence)[ ]*\n[ ]*[\-])/mi
 const readmeLicenseEndRegex = /(?:\s*[#]|^(?:.*?)\n[ ]*[\-]+)/m
 const dotPathRegExp = /^(?<path>(?:\.[\/\\]|\.\.[\/\\])*)/
+const protocolRegExp = /^((?:.*?):\/+)/
 const supportedRepositories = new Set(['github.com', 'gitlab.com', 'bitbucket.org'])
 const branchVariants = ['master', 'main']
-const responseCache = {}
+const requestPromiseCache = {}
 const MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 1039
 
 
@@ -101,7 +102,14 @@ function execute(...args) {
   return generateBundle(resolveParameters(parseArguments(args)))
 }
 
-async function generateBundle({ dir, cacheDir = '.disclaimer', remote, reporting = false, forceFresh = false }) {
+async function generateBundle({
+  dir,
+  cacheDir = '.disclaimer',
+  remote,
+  registry = 'https://registry.npmjs.org/',
+  reporting = false,
+  forceFresh = false,
+}) {
   const packageJson = await readJsonFile(path.join(dir, 'package.json'))
   const nodeModulesPath = path.join(dir, 'node_modules')
   const cacheFilePath = path.join(cacheDir, 'disclaimer.cache.json')
@@ -119,7 +127,6 @@ async function generateBundle({ dir, cacheDir = '.disclaimer', remote, reporting
     await mkdir(cacheDir)
   }
 
-
   let cache = {}
   let packageJsonCache = {}
 
@@ -135,6 +142,7 @@ async function generateBundle({ dir, cacheDir = '.disclaimer', remote, reporting
     cache,
     packageJsonCache,
     remote,
+    registry,
     reporting,
   })
 
@@ -159,8 +167,12 @@ async function resolvePackageInfo(root, context) {
   if (packageJson.name && packageJson.version) {
     id = `${packageJson.name}@${packageJson.version}`
 
-    if (cache.hasOwnProperty(id) && cache[id].licenseText) {
-      return cache[id]
+    if (cache.hasOwnProperty(id)) {
+      const licenseText = cache[id].licenseText
+
+      if (typeof licenseText === 'string') {
+        return licenseText
+      }
     }
   }
 
@@ -169,6 +181,7 @@ async function resolvePackageInfo(root, context) {
       root,
       packageJson,
       packageJsonCache: context.packageJsonCache,
+      registry: context.registry,
     })
     let versionKeys
 
@@ -210,7 +223,9 @@ async function resolvePackageInfo(root, context) {
     root,
     packageJson,
     repositoryUrl,
+    repositoryDirectory: repository?.directory ?? '',
     urlTemplate: context.remote,
+    registry: context.registry,
     cache: context.cache,
     packageJsonCache: context.packageJsonCache,
   }
@@ -230,6 +245,8 @@ async function resolvePackageInfo(root, context) {
     repository,
     homepage,
     repositoryUrl,
+    repositoryDirectory: repository?.directory ?? '',
+    path: root,
     packageJson: !name ? packageJson : null,
     licenseText: licenseText,
     noticeText: noticeText,
@@ -239,7 +256,7 @@ async function resolvePackageInfo(root, context) {
 
 function lacksPackageJsonImportantInformation(packageJson) {
   return !packageJson.version
-    || !packageJson.license
+    || (!packageJson.license && !packageJson.licenses)
     || !packageJson.repository
     || !packageJson.author
 }
@@ -257,7 +274,7 @@ async function searchForLicenseText(context) {
   return searchForContent(context, [
     searchForCachedLicenseText,
     searchForLocalLicenseText,
-    searchForRemoteLicenseText, // @todo: Maybe, first search in repository directory - when specified in "repository".
+    searchForRemoteLicenseText,
     searchForContainerLicenseText,
     searchForLocalLicenseTextInReadme,
     searchForRemotePackageJsonLicenseTextInReadme,
@@ -265,7 +282,7 @@ async function searchForLicenseText(context) {
   ])
 }
 
-async function searchForCachedLicenseText({ id, cache }) {
+async function searchForCachedLicenseText({ id, packageJson, cache }) {
   if (cache.hasOwnProperty(id)) {
     const licenseText = cache[id].licenseText
 
@@ -275,6 +292,8 @@ async function searchForCachedLicenseText({ id, cache }) {
 
     return licenseText
   }
+
+  return null
 }
 
 async function searchForLocalLicenseText({ root }) {
@@ -287,13 +306,13 @@ async function searchForRemoteLicenseText(context) {
   if (licenses && Array.isArray(licenses) && licenses.length === 1 && licenses[0].url) {
     try {
       const url = resolveLicenseUrl(licenses[0].url, context)
-      const licenseText = await request(url)
 
-      if (licenseText) {
-        return licenseText
+      const response = await request(url)
+
+      if (response.headers['content-type'].split(';')[0].trim().toLowerCase() === 'text/plain') {
+        return response.body
       }
     } catch (e) {
-      console.log(e)
     }
   }
 
@@ -316,7 +335,7 @@ async function searchForRemotePackageJsonLicenseTextInReadme(context) {
   const packageJson = await resolveRemotePackageJson(context, true) // true means force-no-version
 
   if (packageJson?.readme) {
-    return await resolveLicenseTextUsingReadme(packageJson?.readme)
+    return await resolveLicenseTextUsingReadme(packageJson?.readme ?? '')
   }
 
   return null
@@ -403,14 +422,14 @@ async function searchForContainerThirdPartyNoticeText(context) {
 
 
 
-async function resolvePackageJson(context) {
+async function resolvePackageJson(context, forceNoVersion) {
   const cachedPackageJson = resolveCachedPackageJson(context)
 
   if (cachedPackageJson) {
     return cachedPackageJson
   }
 
-  return resolveRemotePackageJson(context)
+  return resolveRemotePackageJson(context, forceNoVersion)
 }
 
 function resolveCachedPackageJson({ root, packageJsonCache }) {
@@ -430,7 +449,7 @@ function resolveCachedPackageJson({ root, packageJsonCache }) {
  * @param forceNoVersion
  * @returns {Promise<null|*>}
  */
-async function resolveRemotePackageJson({ root, packageJson, packageJsonCache }, forceNoVersion) {
+async function resolveRemotePackageJson({ root, packageJson, packageJsonCache, registry }, forceNoVersion) {
   const { name, version } = packageJson
   const packageJsonPath = path.join(root, 'package.json')
 
@@ -438,14 +457,14 @@ async function resolveRemotePackageJson({ root, packageJson, packageJsonCache },
     return null
   }
 
-  let url = `https://registry.npmjs.org/${name}`
+  let url = urlJoin(registry, name)
 
   if (forceNoVersion !== true && version) {
     url += `/${version}`
   }
 
   try {
-    const packageJson = JSON.parse(await request(url))
+    const packageJson = JSON.parse(await requestText(url))
 
     if (packageJson) {
       packageJsonCache[packageJsonPath] = packageJson
@@ -482,27 +501,31 @@ function resolveLicenseUrl(url, { packageJson, urlTemplate }) {
 async function searchForRemoteFileContent(branchVariants, pathVariants, {
   packageJson,
   repositoryUrl,
+  repositoryDirectory,
   urlTemplate,
 }) {
   if (!repositoryUrl || !urlTemplate) {
     return ''
   }
 
-  const { owner, name } = extractRepositoryOwnerAndName(repositoryUrl)
+  const { path: repositoryUrlPath } = parseUrl(repositoryUrl)
+  const [owner, name] = trimLeft(repositoryUrlPath, '/').split('/')
 
-  for (const branchVariant of branchVariants) {
-    for (const pathVariant of pathVariants) {
-      const url = replacePlaceholdersWithValues(urlTemplate, {
-        packageName: packageJson.name,
-        repositoryOwner: owner,
-        repositoryName: name,
-        branch: branchVariant,
-        filePath: pathVariant,
-      })
+  for (const basePath of (repositoryDirectory ? [repositoryDirectory, ''] : [''])) {
+    for (const branchVariant of branchVariants) {
+      for (const pathVariant of pathVariants) {
+        const url = replacePlaceholdersWithValues(urlTemplate, {
+          packageName: packageJson.name,
+          repositoryOwner: owner,
+          repositoryName: name,
+          branch: branchVariant,
+          filePath: basePath ? trimLeft(urlJoin(basePath, pathVariant), '/') : pathVariant,
+        })
 
-      try {
-        return await request(url)
-      } catch (e) {
+        try {
+          return await requestText(url)
+        } catch (e) {
+        }
       }
     }
   }
@@ -511,12 +534,41 @@ async function searchForRemoteFileContent(branchVariants, pathVariants, {
 }
 
 function resolveRepositoryUrl(packageJson) {
+  let repositoryUrl = findRepositoryUrl(packageJson)
+
+  if (!repositoryUrl) {
+    return null
+  }
+
+  if (repositoryUrl.startsWith('git+')) {
+    repositoryUrl = repositoryUrl.substr(4)
+  }
+
+  if (!repositoryUrl.startsWith('https://') && !repositoryUrl.startsWith('http://')) {
+    repositoryUrl = repositoryUrl.replace(protocolRegExp, replaceFirstCapturedGroupWithHttpsProtocol)
+  }
+
+  if (repositoryUrl.endsWith('.git')) {
+    repositoryUrl = repositoryUrl.substr(0, repositoryUrl.length - 4)
+  }
+
+  return repositoryUrl
+}
+
+function replaceFirstCapturedGroupWithHttpsProtocol(_, match) {
+  return 'https://'
+}
+
+/**
+ *
+ * @param packageJson
+ * @returns {null|string}
+ */
+function findRepositoryUrl(packageJson) {
   const { repository, homepage, author } = packageJson
 
   if (repository?.url) {
-    return repository.directory
-           ? urlJoin(repository.url, repository.directory)
-           : repository.url
+    return repository.url
   }
 
   if (homepage && includesSupportedRepositoryHost(homepage)) {
@@ -894,6 +946,10 @@ async function resolveContainerPackageJson(root, packageJson) {
     }
   }
 
+  if (!packageJson.hasOwnProperty('_requiredBy')) {
+
+  }
+
   return null
 }
 
@@ -1024,44 +1080,62 @@ function mkdir(targetPath) {
 /**
  *
  * @param {string} url
- * @returns {Promise<string>}
+ * @returns {Promise<{ statusCode: number, statusMessage: string, headers: IncomingHttpHeaders, body: string }>|*}
  */
 function request(url) {
-  return new Promise((resolve, reject) => {
-    if (responseCache.hasOwnProperty(url)) {
-      const { data, error } = responseCache[url]
+  if (requestPromiseCache.hasOwnProperty(url)) {
+    return requestPromiseCache[url]
+  }
 
-      if (error) {
-        reject(error)
-      } else {
-        resolve(data)
-      }
-    }
-
+  const promise = new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http
-    const handleError = error => {
-      responseCache[url] = { error }
-      reject(error)
-    }
     const request = client.request(url, response => {
       let acc = ''
 
       response.on('data', data => acc += data)
-      response.on('error', handleError)
+      response.on('error', error => reject({
+        statusCode: response.statusCode,
+        statusMessage: response.statusMessage,
+        headers: response.headers,
+        body: error,
+      }))
       response.on('end', () => {
         if (response.statusCode >= 400 && response.statusCode <= 599) {
-          responseCache[url] = { error: response }
-          reject(response)
+          reject({
+            statusCode: response.statusCode,
+            statusMessage: response.statusMessage,
+            headers: response.headers,
+            body: acc,
+          })
         } else {
-          responseCache[url] = { data: acc }
-          resolve(acc)
+          resolve({
+            statusCode: response.statusCode,
+            statusMessage: response.statusMessage,
+            headers: response.headers,
+            body: acc,
+          })
         }
       })
     })
 
-    request.on('error', handleError)
+    request.on('error', reject)
     request.end()
   })
+
+  requestPromiseCache[url] = promise
+
+  return promise
+}
+
+/**
+ *
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function requestText(url) {
+  const { body } = await request(url)
+
+  return body
 }
 
 function toPromise(fn, ...args) {
@@ -1076,11 +1150,12 @@ function toPromise(fn, ...args) {
   })
 }
 
-function resolveParameters({ dir, cacheDir, remote, reporting = false, forceFresh = false }) {
+function resolveParameters({ dir, cacheDir, remote, registry, reporting = false, forceFresh = false }) {
   return {
     dir: dir ?? process.cwd(),
     cacheDir,
     remote,
+    registry,
     reporting,
     forceFresh,
   }
@@ -1113,7 +1188,7 @@ function parseArguments(args) {
  */
 async function resolveLicenseTextUsingReadme(readme) {
   const licenseText = readme
-    .split(readmeLicenseStartRegex)[1]
+    ?.split(readmeLicenseStartRegex)[1]
     ?.split(readmeLicenseEndRegex)[0]
     ?.trim()
 
