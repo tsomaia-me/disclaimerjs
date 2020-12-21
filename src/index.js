@@ -10,6 +10,8 @@ const readmeLicenseStartRegex = /(?:^[ ]*[#]+(?:.*?)(?:license|licence)[ ]*(?:(?
 const readmeLicenseEndRegex = /(?:\s*[#]|^(?:.*?)\n[ ]*[\-]+)/m
 const dotPathRegExp = /^(?<path>(?:\.[\/\\]|\.\.[\/\\])*)/
 const protocolRegExp = /^((?:.*?):\/+)/
+const licenseTypesRegExp = /(apache|mit|isc|bsd)\s+license/ig
+const licenseTypeRegExp = /(apache|mit|isc|bsd)\s+license/i
 const supportedRepositories = new Set(['github.com', 'gitlab.com', 'bitbucket.org'])
 const branchVariants = ['master', 'main']
 const requestPromiseCache = {}
@@ -154,10 +156,16 @@ function execute(...args) {
 }
 
 async function generateBundle({
+  out,
   dir,
   cacheDir = '.disclaimer',
   remote,
   registry = 'https://registry.npmjs.org/',
+  append,
+  prepend,
+  json = false,
+  csv = false,
+  txt = true,
   reporting = false,
   forceFresh = false,
 }) {
@@ -190,20 +198,21 @@ async function generateBundle({
   }
 
   const packageJsonFiles = await findPackageJsonFiles(dir)
-  const selectedDevDependencies = findWhiteListedTransitiveDevDependencies(
-    packageJsonFiles,
-    lookupTransitiveDevDependencies,
-  )
+  // const selectedDevDependencies = findWhiteListedTransitiveDevDependencies(
+  //   packageJsonFiles,
+  //   lookupTransitiveDevDependencies,
+  // )
+  //
+  // await writeJsonFile('info.json', selectedDevDependencies)
 
-  await writeJsonFile('info.json', selectedDevDependencies)
-
-  const packageInfos = await resolvePackageInfos(packageJsonFiles, {
+  const context = {
     cache,
     packageJsonCache,
     remote,
     registry,
     reporting,
-  })
+  }
+  const packageInfos = await resolvePackageInfos(packageJsonFiles, context)
 
   await Promise.all([
     writeJsonFile(cacheFilePath, packageInfos.reduce((record, packageInfo) => {
@@ -214,7 +223,55 @@ async function generateBundle({
     writeJsonFile(packageJsonCacheFilePath, packageJsonCache),
   ])
 
+  const normalizedPackageInfos = normalizePackageInfos(packageInfos, context)
+
+  if (json) {
+    const outName = out ?? path.join(dir, 'ThirdPartyLicenses.json')
+    await writeJsonFile(outName, normalizedPackageInfos)
+  }
+
   process.stdout.write('\r')
+}
+
+function normalizePackageInfos(packageInfos, context) {
+  return packageInfos
+    .map(packageInfo => normalizePackageInfo(packageInfo, context))
+}
+
+function normalizePackageInfo({
+  id,
+  name,
+  version,
+  author,
+  licenseList,
+  repositoryUrl,
+  repositoryDirectory,
+  licenseText,
+  noticeText,
+  thirdPartyNoticeText,
+}, context) {
+  // const matches = licenseText.match(licenseTypesRegExp) ?? []
+  // const licenseTypes = matches.map(match => match.match(licenseTypeRegExp)[1])
+  //
+  // for (const licenseType of licenseTypes) {
+  //   const ucLicenseType = licenseType.toUpperCase()
+  //
+  //   if (licenseType && licenseList && licenseList.length > 0 && !licenseList.some(l => l.toUpperCase().includes(ucLicenseType))) {
+  //     if (context.reporting) {
+  //       log(`License text (${licenseType}) of ${id}, likely, does not match with license specified in package.json: ${licenseList.join(', ')}`)
+  //     }
+  //   }
+  // }
+
+  return {
+    name,
+    version,
+    author,
+    repositoryUrl,
+    licenseText,
+    noticeText,
+    thirdPartyNoticeText,
+  }
 }
 
 /**
@@ -375,8 +432,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     repositoryUrl,
     repositoryDirectory: repository?.directory ?? '',
     path: root,
-    packageJson: !name ? packageJson : null,
-    assembled: typeof licenseData === 'string' ? false : licenseData.assembled,
+    assembled: typeof licenseData !== 'string',
     licenseText,
     noticeText: noticeText,
     thirdPartyNoticeText: thirdPartyNoticeText,
@@ -521,12 +577,6 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
 
     if (licenseText && reporting) {
       log(`Auto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
-    }
-  } else {
-    licenseText = generateJoinedLicenseText(templates, id, fullYear)
-
-    if (licenseText && reporting) {
-      log(`Auto-generated COPYRIGHT notice for ${id} using PACKAGE NAME, VERSION and CURRENT YEAR`)
     }
   }
 
@@ -676,6 +726,7 @@ function resolveLicenseUrl(url, { packageJson, urlTemplate }) {
 
   return replacePlaceholdersWithValues(urlTemplate, {
     packageName: packageJson.name,
+    version: packageJson.version,
     repositoryOwner: owner,
     repositoryName: name,
     branch: branch,
@@ -940,6 +991,7 @@ async function resolvePackageInfos(packageJsonFiles, context) {
         const roundedPercent = Math.floor(processed / count * 100)
         progress = `\rProcessing packages: ${roundedPercent < 100 ? `~${roundedPercent}` : roundedPercent}%`
         process.stdout.write(progress)
+
         return packageInfo
       })
     ))
@@ -990,21 +1042,22 @@ async function findPackageJsonFiles(root) {
 /**
  *
  * @param {string} root
+ * @param isOrigin
  * @returns {Promise<Array<string>>}
  */
-async function findPackageRoots(root) {
+async function findPackageRoots(root, isOrigin = true) {
   const paths = []
   const promises = []
 
   for (const entry of await readdir(root)) {
     const entryPath = path.join(root, entry)
 
-    if (entry === 'package.json') {
+    if (!isOrigin && entry === 'package.json') {
       paths.push(root)
     } else {
       promises.push(
         directoryExists(entryPath)
-          .then(exists => !exists ? [] : findPackageRoots(entryPath))
+          .then(exists => !exists ? [] : findPackageRoots(entryPath, false))
       )
     }
   }
@@ -1386,12 +1439,31 @@ function toPromise(fn, ...args) {
   })
 }
 
-function resolveParameters({ dir, cacheDir, remote, registry, reporting = false, forceFresh = false }) {
+function resolveParameters({
+  out,
+  dir,
+  cacheDir,
+  remote,
+  registry,
+  append,
+  prepend,
+  json,
+  csv,
+  txt,
+  reporting,
+  forceFresh,
+}) {
   return {
+    out,
     dir: dir ?? process.cwd(),
     cacheDir,
     remote,
     registry,
+    append,
+    prepend,
+    json,
+    csv,
+    txt,
     reporting,
     forceFresh,
   }
