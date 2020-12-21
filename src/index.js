@@ -233,7 +233,6 @@ async function generateBundle({
   ])
 
   const normalizedPackageInfos = normalizePackageInfos(packageInfos, context)
-  let generatedContent
 
   if (json) {
     const outName = out ?? path.join(dir, 'ThirdPartyLicenses.json')
@@ -243,7 +242,31 @@ async function generateBundle({
     await writeFile(outName, formatCsv(normalizedPackageInfos))
   } else if (txt) {
     const outName = out ?? path.join(dir, 'ThirdPartyLicenses.txt')
-    await writeFile(outName, formatTxt(normalizedPackageInfos))
+    let content
+
+    if (prepend) {
+      content = await readFile(prepend)
+    }
+
+    const generatedContent = formatTxt(normalizedPackageInfos)
+
+    if (generatedContent) {
+      if (content) {
+        content += '\n\n\n'
+      }
+
+      content += generatedContent
+    }
+
+    if (append) {
+      if (content) {
+        content += '\n\n\n'
+      }
+
+      content += await readFile(append)
+    }
+
+    await writeFile(outName, content)
   }
 
   process.stdout.write('\r')
