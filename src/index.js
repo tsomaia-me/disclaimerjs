@@ -163,6 +163,8 @@ async function generateBundle({
   registry = 'https://registry.npmjs.org/',
   append,
   prepend,
+  ignorePackages = '',
+  ignorePaths = '',
   json = false,
   csv = false,
   txt = true,
@@ -189,6 +191,9 @@ async function generateBundle({
   let cache = {}
   let packageJsonCache = {}
 
+  ignorePackages = new Set(!ignorePackages ? [] : ignorePackages.split(',').map(v => v.trim()))
+  ignorePaths = new Set(!ignorePaths ? [] : ignorePaths.split(',').map(v => path.resolve(path.join(dir, v.trim()))))
+
   if (!forceFresh && await fileExists(cacheFilePath)) {
     cache = (await readJsonFile(cacheFilePath)) ?? {}
   }
@@ -197,7 +202,17 @@ async function generateBundle({
     packageJsonCache = (await readJsonFile(packageJsonCacheFilePath)) ?? {}
   }
 
-  const packageJsonFiles = await findPackageJsonFiles(dir)
+  const context = {
+    cache,
+    packageJsonCache,
+    remote,
+    registry,
+    reporting,
+    ignorePackages,
+    ignorePaths,
+  }
+
+  const packageJsonFiles = await findPackageJsonFiles(dir, context)
   // const selectedDevDependencies = findWhiteListedTransitiveDevDependencies(
   //   packageJsonFiles,
   //   lookupTransitiveDevDependencies,
@@ -205,13 +220,7 @@ async function generateBundle({
   //
   // await writeJsonFile('info.json', selectedDevDependencies)
 
-  const context = {
-    cache,
-    packageJsonCache,
-    remote,
-    registry,
-    reporting,
-  }
+
   const packageInfos = await resolvePackageInfos(packageJsonFiles, context)
 
   await Promise.all([
@@ -224,13 +233,123 @@ async function generateBundle({
   ])
 
   const normalizedPackageInfos = normalizePackageInfos(packageInfos, context)
+  let generatedContent
 
   if (json) {
     const outName = out ?? path.join(dir, 'ThirdPartyLicenses.json')
     await writeJsonFile(outName, normalizedPackageInfos)
+  } else if (csv) {
+    const outName = out ?? path.join(dir, 'ThirdPartyLicenses.csv')
+    await writeFile(outName, formatCsv(normalizedPackageInfos))
+  } else if (txt) {
+    const outName = out ?? path.join(dir, 'ThirdPartyLicenses.txt')
+    await writeFile(outName, formatTxt(normalizedPackageInfos))
   }
 
   process.stdout.write('\r')
+}
+
+function formatTxt(normalizedPackageInfos) {
+  return normalizedPackageInfos
+    .map(formatPackageTxt)
+    .join('\n\n\n---------------------------------------------------------------\n\n\n')
+}
+
+function formatPackageTxt({
+  name,
+  version,
+  author,
+  repositoryUrl,
+  licenseText,
+  noticeText,
+  thirdPartyNoticeText,
+}) {
+  let result = `This project may include the following software: ${name}`
+
+  if (version != null) {
+    result += `, version ${version}.`
+  }
+
+  if (repositoryUrl) {
+    result += `\nThe source code of the software may be found at: ${repositoryUrl}`
+  }
+
+  if (author) {
+    result += `\nAuthor of the software: ${author}`
+  }
+
+  if (licenseText || noticeText || thirdPartyNoticeText) {
+    result += '\nSee the'
+
+    if (licenseText) {
+      result += ' license'
+    }
+
+    if (noticeText) {
+      if (licenseText) {
+        result += thirdPartyNoticeText ? ',' : ' and'
+      }
+
+      result += ' notice'
+    }
+
+    if (thirdPartyNoticeText) {
+      if (licenseText || noticeText) {
+        result += licenseText && noticeText ? ' and' : ','
+      }
+
+      result += ' third party notice'
+    }
+
+    result += `, associated with the software, below:`
+  }
+
+  if (licenseText) {
+    result += `\n${licenseText}`
+  }
+
+  if (noticeText) {
+    if (licenseText) {
+      result += '\n'
+    }
+
+    result += `\n${noticeText}`
+  }
+
+  if (thirdPartyNoticeText) {
+    if (noticeText) {
+      result += '\n'
+    }
+
+    result += `\n${thirdPartyNoticeText}`
+  }
+
+  return result
+}
+
+function formatCsv(normalizedPackageInfos) {
+  const headers = [
+    'name',
+    'version',
+    'author',
+    'repositoryUrl',
+    'licenseText',
+    'noticeText',
+    'thirdPartyNoticeText',
+  ]
+
+  return [
+    headers.map(header => JSON.stringify(header)).join(','),
+    ...normalizedPackageInfos.map(item => Object.values({
+      name: JSON.stringify(item.name),
+      version: JSON.stringify(item.version),
+      author: JSON.stringify(item.author),
+      repositoryUrl: JSON.stringify(item.repositoryUrl),
+      licenseText: JSON.stringify(item.licenseText),
+      noticeText: JSON.stringify(item.noticeText),
+      thirdPartyNoticeText: JSON.stringify(item.thirdPartyNoticeText),
+    }).join(',')),
+  ].join('\n')
 }
 
 function normalizePackageInfos(packageInfos, context) {
@@ -266,7 +385,7 @@ function normalizePackageInfo({
   return {
     name,
     version,
-    author,
+    author: typeof author === 'object' ? author.name : author,
     repositoryUrl,
     licenseText,
     noticeText,
@@ -981,20 +1100,30 @@ function isLikeThirdPartyNoticeFileName(name) {
 }
 
 async function resolvePackageInfos(packageJsonFiles, context) {
-  const count = packageJsonFiles.length
+  const { ignorePackages } = context
+  const filteredPackageJsonFiles = packageJsonFiles.filter(packageJsonFile => (
+    !ignorePackages.has(packageJsonFile.packageJson.name)
+    && !ignorePackages.has(packageJsonFile.id)
+  ))
+  const count = filteredPackageJsonFiles.length
   let processed = 0
 
   const packageInfos = await Promise.all(
-    packageJsonFiles.map(packageJsonFile => (
-      resolvePackageInfo(packageJsonFile, context).then(packageInfo => {
-        ++processed
-        const roundedPercent = Math.floor(processed / count * 100)
-        progress = `\rProcessing packages: ${roundedPercent < 100 ? `~${roundedPercent}` : roundedPercent}%`
-        process.stdout.write(progress)
+    filteredPackageJsonFiles
+      .filter(packageJsonFile => (
+        !ignorePackages.has(packageJsonFile.packageJson.name)
+        && !ignorePackages.has(packageJsonFile.id)
+      ))
+      .map(packageJsonFile => (
+        resolvePackageInfo(packageJsonFile, context).then(packageInfo => {
+          ++processed
+          const roundedPercent = Math.floor(processed / count * 100)
+          progress = `\rProcessing packages: ${roundedPercent < 100 ? `~${roundedPercent}` : roundedPercent}%`
+          process.stdout.write(progress)
 
-        return packageInfo
-      })
-    ))
+          return packageInfo
+        })
+      ))
   )
 
   return packageInfos.filter(p => !!p)
@@ -1021,16 +1150,18 @@ async function getMatchedFilePaths(root, predicate) {
 /**
  *
  * @param {string} root
+ * @param context
  * @returns {Promise<{packageJson: *, dirPath: string, packageJsonPath: string}[]>}
  */
-async function findPackageJsonFiles(root) {
-  const packageRoots = await findPackageRoots(root)
+async function findPackageJsonFiles(root, context) {
+  const packageRoots = await findPackageRoots(root, context)
 
   return await Promise.all(
     packageRoots.map(packageRoot => {
       const packageJsonPath = path.join(packageRoot, 'package.json')
 
       return readJsonFile(packageJsonPath).then(packageJson => ({
+        id: `${packageJson.name}@${packageJson.version}`,
         dirPath: packageRoot,
         packageJsonPath,
         packageJson,
@@ -1042,10 +1173,17 @@ async function findPackageJsonFiles(root) {
 /**
  *
  * @param {string} root
+ * @param context
  * @param isOrigin
  * @returns {Promise<Array<string>>}
  */
-async function findPackageRoots(root, isOrigin = true) {
+async function findPackageRoots(root, context, isOrigin = true) {
+  const { ignorePaths } = context
+
+  if (ignorePaths.has(path.resolve(root))) {
+    return []
+  }
+
   const paths = []
   const promises = []
 
@@ -1057,7 +1195,13 @@ async function findPackageRoots(root, isOrigin = true) {
     } else {
       promises.push(
         directoryExists(entryPath)
-          .then(exists => !exists ? [] : findPackageRoots(entryPath, false))
+          .then(exists => {
+            if (!exists || ignorePaths.has(path.resolve(entryPath))) {
+              return []
+            }
+
+            return findPackageRoots(entryPath, context, false)
+          })
       )
     }
   }
@@ -1447,6 +1591,8 @@ function resolveParameters({
   registry,
   append,
   prepend,
+  ignorePackages,
+  ignorePaths,
   json,
   csv,
   txt,
@@ -1461,6 +1607,8 @@ function resolveParameters({
     registry,
     append,
     prepend,
+    ignorePackages,
+    ignorePaths,
     json,
     csv,
     txt,
