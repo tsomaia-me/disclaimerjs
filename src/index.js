@@ -14,7 +14,13 @@ const supportedRepositories = new Set(['github.com', 'gitlab.com', 'bitbucket.or
 const branchVariants = ['master', 'main']
 const requestPromiseCache = {}
 const MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 1039
-
+const ISC_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 715
+const APACHE_2_0_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 547
+const licenseTemplatePaths = {
+  MIT: path.join(__dirname, 'templates/MIT.template'),
+  ISC: path.join(__dirname, 'templates/ISC.template'),
+  APACHE_2_0: path.join(__dirname, 'templates/APACHE-2.0.template'),
+}
 
 const remoteLicenseFilePathVariants = [
   'LICENSE',
@@ -168,10 +174,10 @@ async function resolvePackageInfo(root, context) {
     id = `${packageJson.name}@${packageJson.version}`
 
     if (cache.hasOwnProperty(id)) {
-      const licenseText = cache[id].licenseText
+      const item = cache[id]
 
-      if (typeof licenseText === 'string') {
-        return licenseText
+      if (!item.assembled) {
+        return item
       }
     }
   }
@@ -218,18 +224,21 @@ async function resolvePackageInfo(root, context) {
   } = packageJson
   id = `${packageJson.name}@${packageJson.version}`
   const repositoryUrl = resolveRepositoryUrl(packageJson)
+  const licenseList = resolveLicenseList(packageJson)
   const searchOptions = {
     id,
     root,
     packageJson,
     repositoryUrl,
+    licenseList,
     repositoryDirectory: repository?.directory ?? '',
     urlTemplate: context.remote,
     registry: context.registry,
     cache: context.cache,
+    reporting: context.reporting,
     packageJsonCache: context.packageJsonCache,
   }
-  const [licenseText, noticeText, thirdPartyNoticeText] = await Promise.all([
+  const [licenseData, noticeText, thirdPartyNoticeText] = await Promise.all([
     searchForLicenseText(searchOptions),
     searchForNoticeText(searchOptions),
     searchForThirdPartyNoticeText(searchOptions),
@@ -242,13 +251,15 @@ async function resolvePackageInfo(root, context) {
     author,
     license,
     licenses,
+    licenseList,
     repository,
     homepage,
     repositoryUrl,
     repositoryDirectory: repository?.directory ?? '',
     path: root,
     packageJson: !name ? packageJson : null,
-    licenseText: licenseText,
+    assembled: typeof licenseData === 'string' ? false : licenseData.assembled,
+    licenseText: typeof licenseData === 'string' ? licenseData : licenseData.text,
     noticeText: noticeText,
     thirdPartyNoticeText: thirdPartyNoticeText,
   }
@@ -279,18 +290,13 @@ async function searchForLicenseText(context) {
     searchForLocalLicenseTextInReadme,
     searchForRemotePackageJsonLicenseTextInReadme,
     searchForRemoteLicenseTextInReadme,
+    assembleLicenseText,
   ])
 }
 
-async function searchForCachedLicenseText({ id, packageJson, cache }) {
-  if (cache.hasOwnProperty(id)) {
-    const licenseText = cache[id].licenseText
-
-    if (typeof licenseText === 'object' && licenseText.assembled) {
-      return null
-    }
-
-    return licenseText
+async function searchForCachedLicenseText({ id, assembled, cache }) {
+  if (!assembled && cache.hasOwnProperty(id)) {
+    return cache[id].licenseText
   }
 
   return null
@@ -353,6 +359,60 @@ async function searchForRemoteLicenseTextInReadme(context) {
 
 async function searchForContainerLicenseText(context) {
   return searchForContainerContent(searchForLicenseText, context)
+}
+
+async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList, reporting }) {
+  const paths = licenseList
+    .filter(type => {
+      const ucType = type.toUpperCase()
+
+      if (licenseTemplatePaths.hasOwnProperty(ucType)) {
+        return true
+      }
+
+      if (reporting) {
+        console.log(`\nCould not find ${type} license template for package: ${id}`)
+      }
+
+      return false
+    })
+    .map(type => licenseTemplatePaths[type.toUpperCase()])
+
+  const templates = await Promise.all(paths.map(readFile))
+  const fullYear = new Date().getFullYear()
+  let licenseText
+
+  if (packageJson.author) {
+    const authorName = typeof packageJson.author === 'object' ? packageJson.author.name : packageJson.author
+    licenseText = generateJoinedLicenseText(templates, authorName, fullYear)
+
+    if (licenseText && reporting) {
+      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using AUTHOR NAME and CURRENT YEAR`)
+    }
+  } else if (repositoryUrl) {
+    const { path: repositoryPath } = parseUrl(repositoryUrl)
+    const [owner] = trimLeft(repositoryPath, '/').split('/')
+    licenseText = generateJoinedLicenseText(templates, owner, fullYear)
+
+    if (licenseText && reporting) {
+      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
+    }
+  } else {
+    licenseText = generateJoinedLicenseText(templates, id, fullYear)
+
+    if (licenseText && reporting) {
+      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using PACKAGE NAME and VERSION and CURRENT YEAR`)
+    }
+  }
+
+  if (!licenseText) {
+    return null
+  }
+
+  return {
+    assembled: true,
+    text: licenseText,
+  }
 }
 
 /** End License Text Resolvers */
@@ -982,6 +1042,21 @@ async function searchForContainerContent(resolver, { root, packageJson, remote, 
   return ''
 }
 
+function resolveLicenseList(packageJson) {
+  const { license, licenses } = packageJson
+  const resolvedList = !licenses ? [] : licenses.map(mapLicenseDefinitionToType)
+
+  if (license) {
+    resolvedList.push(license) // @todo: Maybe parse license?
+  }
+
+  return resolvedList
+}
+
+function mapLicenseDefinitionToType(licenseDefinition) {
+  return licenseDefinition.type
+}
+
 /**
  *
  * @param {string} targetPath
@@ -1199,9 +1274,27 @@ async function resolveLicenseTextUsingReadme(readme) {
   if (isPossiblyAnMITCopyright(licenseText)) {
     return {
       assembled: true,
-      text: replacePlaceholdersWithValues(await readFile(path.join(__dirname, 'templates/MIT.template')), {
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT), {
         copyright: licenseText,
-      }).trim(),
+      }), '\n')
+    }
+  }
+
+  if (isPossiblyAnISCCopyright(licenseText)) {
+    return {
+      assembled: true,
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.ISC), {
+        copyright: licenseText,
+      }), '\n')
+    }
+  }
+
+  if (isPossiblyAnApache2_0Copyright(licenseText)) {
+    return {
+      assembled: true,
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.APACHE_2_0), {
+        copyright: licenseText,
+      }), '\n')
     }
   }
 
@@ -1211,6 +1304,18 @@ async function resolveLicenseTextUsingReadme(readme) {
 function isPossiblyAnMITCopyright(text) {
   return text.toUpperCase().includes('MIT')
     && text.length < MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
+}
+
+function isPossiblyAnISCCopyright(text) {
+  return text.toUpperCase().includes('ISC')
+    && text.length < ISC_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
+}
+
+function isPossiblyAnApache2_0Copyright(text) {
+  return (text.toUpperCase().includes('APACHE 2.0')
+    || text.toUpperCase().includes('APACHE-2.0')
+    || text.toUpperCase().includes('APACHE_2.0'))
+    && text.length < APACHE_2_0_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
 }
 
 function replacePlaceholdersWithValues(template, parameters) {
@@ -1266,6 +1371,12 @@ function urlJoin(base, ...segments) {
   }
 
   return url
+}
+
+function generateJoinedLicenseText(templates, holder, year) {
+  return templates.map(template => replacePlaceholdersWithValues(template, {
+    copyright: `Copyright (c) ${year} ${holder}`
+  })).join('\n\n\n')
 }
 
 exports.execute = execute
