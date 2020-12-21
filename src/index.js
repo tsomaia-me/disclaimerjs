@@ -104,6 +104,51 @@ const remoteNoticeFilePathVariants = [
   'CopyrightNotice.txt',
 ]
 
+const lookupTransitiveDevDependencies = [
+  { target: 'webpack', exact: true },
+  { target: 'babel', exact: true },
+  { target: 'gulp', exact: true },
+  { target: 'percel', exact: true },
+  { target: 'browserify', exact: true },
+  { target: 'grunt', exact: true },
+  { target: 'typescript', exact: true },
+  { target: 'flow', exact: true },
+  { target: 'coffeescript', exact: true },
+  { target: 'elm', exact: true },
+  { target: 'clojurescript', exact: true },
+  { target: 'purescript', exact: true },
+  { target: 'sass', exact: true },
+  { target: 'scss', exact: true },
+  { target: 'less', exact: true },
+  { target: 'postcss', exact: true },
+  { target: 'react-css-modules', exact: true },
+  { target: 'webassemblyjs', exact: true },
+
+  { target: 'webpack-', exact: false },
+  { target: '@webpack/', exact: false },
+  { target: 'babel-', exact: false },
+  { target: '@babel/', exact: false },
+  { target: 'gulp-', exact: false },
+  { target: '@gulp/', exact: false },
+  { target: 'percel-', exact: false },
+  { target: '@percel/', exact: false },
+  { target: 'browserify-', exact: false },
+  { target: '@browserify/', exact: false },
+  { target: 'grunt-', exact: false },
+  { target: '@grunt/', exact: false },
+  { target: '@webassemblyjs/', exact: false },
+]
+
+let progress = ''
+
+function log(...args) {
+  process.stdout.write(`\r${args.map(String).join(' ')}\n`)
+
+  if (progress) {
+    process.stdout.write(progress)
+  }
+}
+
 function execute(...args) {
   return generateBundle(resolveParameters(parseArguments(args)))
 }
@@ -144,7 +189,15 @@ async function generateBundle({
     packageJsonCache = (await readJsonFile(packageJsonCacheFilePath)) ?? {}
   }
 
-  const packageInfos = await resolvePackageInfos(dir, {
+  const packageJsonFiles = await findPackageJsonFiles(dir)
+  const selectedDevDependencies = findWhiteListedTransitiveDevDependencies(
+    packageJsonFiles,
+    lookupTransitiveDevDependencies,
+  )
+
+  await writeJsonFile('info.json', selectedDevDependencies)
+
+  const packageInfos = await resolvePackageInfos(packageJsonFiles, {
     cache,
     packageJsonCache,
     remote,
@@ -164,10 +217,66 @@ async function generateBundle({
   process.stdout.write('\r')
 }
 
-async function resolvePackageInfo(root, context) {
+/**
+ *
+ * @param {Array<{ dirPath: string, packageJsonPath: string, packageJson: * }>} packageJsonFiles
+ * @param {Array<{ target: string, exact: boolean }>} patterns
+ */
+function findWhiteListedTransitiveDevDependencies(packageJsonFiles, patterns) {
+  const selectedDevDependencyMap = {}
+
+  for (const { packageJson } of packageJsonFiles) {
+    const devDependencies = packageJson.devDependencies
+
+    if (devDependencies) {
+      for (const devDependency of Object.keys(devDependencies)) {
+        for (const pattern of patterns) {
+          if (matchesDependencyPattern(devDependency, pattern)) {
+            if (!selectedDevDependencyMap.hasOwnProperty(devDependency)) {
+              selectedDevDependencyMap[devDependency] = {}
+            }
+
+            const value = devDependencies[devDependency]
+            selectedDevDependencyMap[devDependency][value] = true // პირველადი ფილტრაცია, რის შედეგადაც კონკრეტული key@value არ გამერდება
+          }
+        }
+      }
+    }
+  }
+
+  // const selectedDevDependencies = Object.values(selectedDevDependencyMap)
+  //
+  // for (let i = 0, l = selectedDevDependencies.length; i < l; ++i) { // მეორეული ფილტრაცია, როდესაც შეწყობადი ვერსიებიდან უნდა დარჩეს ერთერთი
+  //   const a = selectedDevDependencies[i]
+  //
+  //   for (let j = i + 1; j < l; ++j) {
+  //     const b = selectedDevDependencies[j]
+  //
+  //     if (a.name)
+  //   }
+  // }
+
+  return Object.keys(selectedDevDependencyMap).map(name => ({
+    name,
+    values: Object.keys(selectedDevDependencyMap[name]).sort(),
+  }))
+}
+
+/**
+ *
+ * @param {string} name
+ * @param {{target: string, exact: boolean}} pattern
+ */
+function matchesDependencyPattern(name, pattern) {
+  if (pattern.exact) {
+    return name === pattern.target
+  }
+
+  return name.startsWith(pattern.target)
+}
+
+async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson }, context) {
   const cache = context.cache
-  const packageJsonPath = path.join(root, 'package.json')
-  let packageJson = await readJsonFile(packageJsonPath)
   let id
 
   if (packageJson.name && packageJson.version) {
@@ -180,6 +289,14 @@ async function resolvePackageInfo(root, context) {
         return item
       }
     }
+  }
+
+  if (shouldIgnorePackageJson(packageJson)) {
+    // if (context.reporting) {
+    //   log(`Ignoring package.json at: ${packageJsonPath}`, JSON.stringify(packageJson))
+    // }
+
+    return null
   }
 
   if (lacksPackageJsonImportantInformation(packageJson)) {
@@ -207,10 +324,6 @@ async function resolvePackageInfo(root, context) {
       ...remotePackageJson,
       ...packageJson,
     }
-
-    // if (!hasPackageJsonAnEssentialInformation(packageJson)) {
-    //   return null
-    // }
   }
 
   const {
@@ -243,9 +356,14 @@ async function resolvePackageInfo(root, context) {
     searchForNoticeText(searchOptions),
     searchForThirdPartyNoticeText(searchOptions),
   ])
+  const licenseText = typeof licenseData === 'string' ? licenseData : licenseData.text
+
+  if (!licenseText && context.reporting) {
+    log(`No license text for ${id} (root: ${root})`)
+  }
 
   return {
-    id,
+    id: id === 'undefined@undefined' ? `undefined:${root}` : id,
     name,
     version,
     author,
@@ -259,7 +377,7 @@ async function resolvePackageInfo(root, context) {
     path: root,
     packageJson: !name ? packageJson : null,
     assembled: typeof licenseData === 'string' ? false : licenseData.assembled,
-    licenseText: typeof licenseData === 'string' ? licenseData : licenseData.text,
+    licenseText,
     noticeText: noticeText,
     thirdPartyNoticeText: thirdPartyNoticeText,
   }
@@ -272,11 +390,18 @@ function lacksPackageJsonImportantInformation(packageJson) {
     || !packageJson.author
 }
 
-function hasPackageJsonAnEssentialInformation(packageJson) {
-  return !!packageJson.license
-    || !!packageJson.repository
-    || !!packageJson.homepage
-    || !!packageJson.author
+function shouldIgnorePackageJson(packageJson) {
+  // If package.json does not specify name, why not ignore it?
+  return !packageJson.name
+
+  // // If package.json does not contain even one of the information below, then why not just ignore it?
+  // return !packageJson.name
+  //   && !packageJson.version
+  //   && !packageJson.license
+  //   && !packageJson.licenses
+  //   && !packageJson.repository
+  //   && !packageJson.homepage
+  //   && !packageJson.author
 }
 
 /** License Text Resolvers */
@@ -371,7 +496,7 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
       }
 
       if (reporting) {
-        console.log(`\nCould not find ${type} license template for package: ${id}`)
+        log(`Could not find ${type} license template for package: ${id}`)
       }
 
       return false
@@ -387,7 +512,7 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
     licenseText = generateJoinedLicenseText(templates, authorName, fullYear)
 
     if (licenseText && reporting) {
-      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using AUTHOR NAME and CURRENT YEAR`)
+      log(`Auto-generated COPYRIGHT notice for ${id} using AUTHOR NAME and CURRENT YEAR`)
     }
   } else if (repositoryUrl) {
     const { path: repositoryPath } = parseUrl(repositoryUrl)
@@ -395,13 +520,13 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
     licenseText = generateJoinedLicenseText(templates, owner, fullYear)
 
     if (licenseText && reporting) {
-      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
+      log(`Auto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
     }
   } else {
     licenseText = generateJoinedLicenseText(templates, id, fullYear)
 
     if (licenseText && reporting) {
-      console.log(`\nAuto-generated COPYRIGHT notice for ${id} using PACKAGE NAME and VERSION and CURRENT YEAR`)
+      log(`Auto-generated COPYRIGHT notice for ${id} using PACKAGE NAME, VERSION and CURRENT YEAR`)
     }
   }
 
@@ -804,32 +929,21 @@ function isLikeThirdPartyNoticeFileName(name) {
     || ucName.endsWith('.3RDPARTYNOTICETEXT')
 }
 
-async function resolvePackageInfos(root, context) {
-  // const packageInfos = []
-  const roots = await findPackageRoots(root)
-  const promises = []
-  const count = roots.length
+async function resolvePackageInfos(packageJsonFiles, context) {
+  const count = packageJsonFiles.length
   let processed = 0
 
-  for (let i = 0; i < count; ++i) {
-    const packageRoot = roots[i]
-    promises.push(resolvePackageInfo(packageRoot, context).then(packageInfo => {
-      ++processed
-      const roundedPercent = Math.floor(processed / count * 100)
-      process.stdout.write(`\rProcessing packages: ${roundedPercent < 100 ? `~${roundedPercent}` : roundedPercent}%`)
-      return packageInfo
-    }))
-
-    // const packageInfo = await resolvePackageInfo(packageRoot, context, i, l)
-    //
-    // if (packageInfo) {
-    //   packageInfos.push(packageInfo)
-    // }
-  }
-
-  // return packageInfos
-
-  const packageInfos = await Promise.all(promises)
+  const packageInfos = await Promise.all(
+    packageJsonFiles.map(packageJsonFile => (
+      resolvePackageInfo(packageJsonFile, context).then(packageInfo => {
+        ++processed
+        const roundedPercent = Math.floor(processed / count * 100)
+        progress = `\rProcessing packages: ${roundedPercent < 100 ? `~${roundedPercent}` : roundedPercent}%`
+        process.stdout.write(progress)
+        return packageInfo
+      })
+    ))
+  )
 
   return packageInfos.filter(p => !!p)
 }
@@ -852,15 +966,41 @@ async function getMatchedFilePaths(root, predicate) {
   return matchedFileNames
 }
 
+/**
+ *
+ * @param {string} root
+ * @returns {Promise<{packageJson: *, dirPath: string, packageJsonPath: string}[]>}
+ */
+async function findPackageJsonFiles(root) {
+  const packageRoots = await findPackageRoots(root)
+
+  return await Promise.all(
+    packageRoots.map(packageRoot => {
+      const packageJsonPath = path.join(packageRoot, 'package.json')
+
+      return readJsonFile(packageJsonPath).then(packageJson => ({
+        dirPath: packageRoot,
+        packageJsonPath,
+        packageJson,
+      }))
+    })
+  )
+}
+
+/**
+ *
+ * @param {string} root
+ * @returns {Promise<Array<string>>}
+ */
 async function findPackageRoots(root) {
-  const packageJsons = []
+  const paths = []
   const promises = []
 
   for (const entry of await readdir(root)) {
     const entryPath = path.join(root, entry)
 
     if (entry === 'package.json') {
-      packageJsons.push(root)
+      paths.push(root)
     } else {
       promises.push(
         directoryExists(entryPath)
@@ -870,7 +1010,7 @@ async function findPackageRoots(root) {
   }
 
   return [
-    ...packageJsons,
+    ...paths,
     ...(await Promise.all(promises)).reduce(flatten, []),
   ]
 }
@@ -991,51 +1131,72 @@ async function searchForContent(context, resolvers) {
 }
 
 async function resolveContainerPackageJson(root, packageJson) {
-  if (packageJson.main && typeof packageJson.main === 'string') {
-    const dotPath = extractDotPath(packageJson.main)
+  const variants = [packageJson.main, packageJson.module]
 
-    if (!dotPath || dotPath === '.' || dotPath === './') {
-      return ''
+  for (const variant of variants) {
+    if (variant && typeof variant === 'string') {
+      const dotPath = extractDotPath(variant)
+
+      if (!dotPath || dotPath === '.' || dotPath === './') {
+        return ''
+      }
+
+      const targetPath = path.join(root, dotPath)
+      const packageJsonPath = path.join(targetPath, 'package.json')
+
+      if (await fileExists(packageJsonPath)) {
+        return await readJsonFile(packageJsonPath)
+      }
     }
 
-    const targetPath = path.join(root, extractDotPath(packageJson.main))
-    const packageJsonPath = path.join(targetPath, 'package.json')
+    if (!packageJson.hasOwnProperty('_requiredBy')) {
 
-    if (await fileExists(packageJsonPath)) {
-      return await readJsonFile(packageJsonPath)
     }
-  }
-
-  if (!packageJson.hasOwnProperty('_requiredBy')) {
-
   }
 
   return null
 }
 
-async function searchForContainerContent(resolver, { root, packageJson, remote, cache }) {
-  if (packageJson.main && typeof packageJson.main === 'string') {
-    const dotPath = extractDotPath(packageJson.main)
+async function searchForContainerContent(resolver, {
+  root,
+  packageJson,
+  remote,
+  cache,
+  registry,
+  reporting,
+  packageJsonCache,
+}) {
+  const variants = [packageJson.main, packageJson.module]
 
-    if (!dotPath || dotPath === '.' || dotPath === './') {
-      return ''
-    }
+  for (const variant of variants) {
+    if (variant && typeof variant === 'string') {
+      const dotPath = extractDotPath(variant)
 
-    const targetPath = path.join(root, extractDotPath(packageJson.main))
-    const packageJsonPath = path.join(targetPath, 'package.json')
+      if (!dotPath || dotPath === '.' || dotPath === './') {
+        return ''
+      }
 
-    if (await fileExists(packageJsonPath)) {
-      const parentPackageJson = await readJsonFile(packageJsonPath)
-      const id = `${parentPackageJson.name}@${parentPackageJson.version}`
+      const targetPath = path.join(root, dotPath)
+      const packageJsonPath = path.join(targetPath, 'package.json')
 
-      return await resolver({
-        id,
-        root: targetPath,
-        packageJson: parentPackageJson,
-        repositoryUrl: resolveRepositoryUrl(packageJson),
-        urlTemplate: remote,
-        cache: cache,
-      })
+      if (await fileExists(packageJsonPath)) {
+        const parentPackageJson = await readJsonFile(packageJsonPath)
+        const id = `${parentPackageJson.name}@${parentPackageJson.version}`
+
+        return await resolver({
+          id,
+          root: targetPath,
+          packageJson: parentPackageJson,
+          repositoryUrl: resolveRepositoryUrl(packageJson) ?? resolveRepositoryUrl(parentPackageJson),
+          repositoryDirectory: packageJson.repository?.directory ?? parentPackageJson.repository?.directory ?? '',
+          urlTemplate: remote,
+          cache,
+          registry,
+          reporting,
+          packageJsonCache,
+          licenseList: resolveLicenseList(packageJson) ?? resolveLicenseList(parentPackageJson),
+        })
+      }
     }
   }
 
