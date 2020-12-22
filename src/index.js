@@ -242,7 +242,7 @@ async function generateBundle({
     await writeFile(outName, formatCsv(normalizedPackageInfos))
   } else if (txt) {
     const outName = out ?? path.join(dir, 'ThirdPartyLicenses.txt')
-    let content
+    let content = ''
 
     if (prepend) {
       content = await readFile(prepend)
