@@ -59,7 +59,7 @@ For more detailed API explanation, see API section.
               {
                 "name": "",
                 "version": "",
-                "author": "",
+                "authors": [],
                 "maintainers": [],
                 "contributors": [],
                 "repositoryUrl": "",
@@ -71,7 +71,7 @@ For more detailed API explanation, see API section.
 
 - --csv - (optional) Output data as csv (the default is false):
           
-      "name","version","author","maintainers","contributors","repositoryUrl","licenseText","noticeText","thirdPartyNoticeText"
+      "name","version","authors","maintainers","contributors","repositoryUrl","licenseText","noticeText","thirdPartyNoticeText"
       "","","","","","","","",""
 
 - --txt - (optional) Output data as text (.txt) (the default is true).

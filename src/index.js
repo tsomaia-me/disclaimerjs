@@ -323,7 +323,7 @@ function formatTxt(normalizedPackageInfos) {
 function formatPackageTxt({
   name,
   version,
-  author,
+  authors,
   maintainers,
   contributors,
   repositoryUrl,
@@ -341,8 +341,12 @@ function formatPackageTxt({
     result += `\nThe source code of the software may be found at: ${repositoryUrl}`
   }
 
-  if (author) {
-    result += `\nAuthor of the software: ${author}`
+  if (authors) {
+    if (authors.length === 1) {
+      result += `\nAuthor of the software: ${joinByCommaAnd(authors)}`
+    } else if (authors.length > 1) {
+      result += `\nAuthors of the software: ${joinByCommaAnd(authors)}`
+    }
   }
 
   if (maintainers && Array.isArray(maintainers) && maintainers.length > 0) {
@@ -420,7 +424,7 @@ function formatCsv(normalizedPackageInfos) {
     ...normalizedPackageInfos.map(item => Object.values({
       name: JSON.stringify(item.name),
       version: JSON.stringify(item.version),
-      author: JSON.stringify(item.author),
+      authors: JSON.stringify(joinByCommaAnd(item.authors)),
       maintainers: JSON.stringify(item.maintainers.join('\n')),
       contributors: JSON.stringify(item.contributors.join('\n')),
       repositoryUrl: JSON.stringify(item.repositoryUrl),
@@ -450,7 +454,7 @@ function normalizePackageInfo({
   id,
   name,
   version,
-  author,
+  authors,
   maintainers,
   contributors,
   licenseList,
@@ -476,7 +480,7 @@ function normalizePackageInfo({
   return {
     name,
     version,
-    author: mapPersonInfoToName(author),
+    authors: !authors || !Array.isArray(authors) ? [] : authors.map(mapPersonInfoToName),
     maintainers: !maintainers || !Array.isArray(maintainers) ? [] : maintainers.map(mapPersonInfoToName),
     contributors: !contributors || !Array.isArray(contributors) ? [] : contributors.map(mapPersonInfoToName),
     repositoryUrl,
@@ -487,7 +491,17 @@ function normalizePackageInfo({
 }
 
 function mapPersonInfoToName(info) {
-  return typeof info === 'object' ? info.name : info
+  if (typeof info !== 'object') {
+    return info
+  }
+
+  let result = info.name
+
+  if (info.email) {
+    result += ` <${info.email}>`
+  }
+
+  return result
 }
 
 /**
@@ -600,12 +614,13 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     }
   }
 
-  const {
+  let {
     name,
     version,
     license,
     licenses,
     author,
+    authors,
     maintainers,
     contributors,
     repository,
@@ -614,10 +629,20 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
   id = `${packageJson.name}@${packageJson.version}`
   const repositoryUrl = resolveRepositoryUrl(packageJson)
   const licenseList = resolveLicenseList(packageJson)
+
+  if (!authors) {
+    authors = []
+  }
+
+  if (author) {
+    authors = [author, ...authors]
+  }
+
   const searchOptions = {
     id,
     root,
     packageJson,
+    authors,
     repositoryUrl,
     licenseList,
     repositoryDirectory: repository?.directory ?? '',
@@ -627,6 +652,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     reporting: context.reporting,
     packageJsonCache: context.packageJsonCache,
   }
+
   const [licenseData, noticeText, thirdPartyNoticeText] = await Promise.all([
     searchForLicenseText(searchOptions),
     searchForNoticeText(searchOptions),
@@ -638,7 +664,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     id: id === 'undefined@undefined' ? `undefined:${root}` : id,
     name,
     version,
-    author,
+    authors,
     maintainers: maintainers && Array.isArray(maintainers) ? maintainers : [],
     contributors: contributors && Array.isArray(contributors) ? contributors : [],
     license,
@@ -660,7 +686,7 @@ function lacksPackageJsonImportantInformation(packageJson) {
   return !packageJson.version
     || (!packageJson.license && !packageJson.licenses)
     || !packageJson.repository
-    || !packageJson.author
+    || (!packageJson.author && !packageJson.authors)
 }
 
 function shouldIgnorePackageJson(packageJson) {
@@ -675,6 +701,7 @@ function shouldIgnorePackageJson(packageJson) {
   //   && !packageJson.repository
   //   && !packageJson.homepage
   //   && !packageJson.author
+  //   && !packageJson.authors
 }
 
 /** License Text Resolvers */
@@ -761,7 +788,7 @@ async function searchForContainerLicenseText(context) {
   return searchForContainerContent(searchForLicenseText, context)
 }
 
-async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList, reporting }) {
+async function assembleLicenseText({ id, repositoryUrl, authors, packageJson, licenseList, reporting }) {
   const paths = licenseList
     .filter(type => {
       const ucType = type.toUpperCase()
@@ -782,20 +809,27 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
   const fullYear = new Date().getFullYear()
   let licenseText
 
-  if (packageJson.author) {
-    const authorName = typeof packageJson.author === 'object' ? packageJson.author.name : packageJson.author
-    licenseText = generateJoinedLicenseText(templates, authorName, fullYear, packageJson)
+  if (authors && authors.length > 0) {
+    licenseText = generateJoinedLicenseText(templates, authors, fullYear, packageJson)
 
     if (licenseText && reporting) {
-      log(`Auto-generated COPYRIGHT notice for ${id} using AUTHOR NAME and CURRENT YEAR`)
+      log(`Auto-generated COPYRIGHT notice for ${id} using ${authors.length > 1
+                                                             ? 'AUTHORS'
+                                                             : 'AUTHOR'} and CURRENT YEAR`)
     }
   } else if (repositoryUrl) {
     const { path: repositoryPath } = parseUrl(repositoryUrl)
     const [owner] = trimLeft(repositoryPath, '/').split('/')
-    licenseText = generateJoinedLicenseText(templates, owner, fullYear, packageJson)
+    licenseText = generateJoinedLicenseText(templates, [owner], fullYear, packageJson)
 
     if (licenseText && reporting) {
       log(`Auto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
+    }
+  } else {
+    licenseText = generateJoinedLicenseText(templates, ['NO AUTHOR NAME FOUND'], fullYear, packageJson)
+
+    if (licenseText && reporting) {
+      log(`Auto-generated COPYRIGHT notice for ${id} using PACKAGE NAME, "NO AUTHOR NAME FOUND" and CURRENT YEAR`)
     }
   }
 
@@ -1020,7 +1054,7 @@ function replaceFirstCapturedGroupWithHttpsProtocol(_, match) {
  * @returns {null|string}
  */
 function findRepositoryUrl(packageJson) {
-  const { repository, homepage, author } = packageJson
+  const { repository, homepage, author, authors } = packageJson
 
   if (repository?.url) {
     return repository.url
@@ -1032,6 +1066,14 @@ function findRepositoryUrl(packageJson) {
 
   if (author?.url && includesSupportedRepositoryHost(author.url)) {
     return author.url
+  }
+
+  if (authors) {
+    for (const info of authors) {
+      if (info?.url && includesSupportedRepositoryHost(info.url)) {
+        return info.url
+      }
+    }
   }
 
   return null
@@ -1754,10 +1796,11 @@ function parseArguments(args) {
  *
  * @param {string} readme
  *
+ * @param authors
  * @param packageJson
  * @returns {Promise<string>}
  */
-async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
+async function resolveLicenseTextUsingReadme(readme, { authors, packageJson }) {
   const licenseText = readme
     ?.split(readmeLicenseStartRegex)[1]
     ?.split(readmeLicenseEndRegex)[0]
@@ -1767,8 +1810,6 @@ async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
     return ''
   }
 
-  const author = typeof packageJson.author === 'object' ? packageJson.author.name : packageJson.author
-
   if (isPossiblyAnApache2_0Copyright(licenseText)) {
     return {
       assembled: true,
@@ -1776,7 +1817,7 @@ async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
         copyright: licenseText,
         packageName: packageJson.name,
         version: packageJson.version,
-        author,
+        authors: joinByCommaAnd(authors),
       }), '\n')
     }
   }
@@ -1788,7 +1829,7 @@ async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
         copyright: licenseText,
         packageName: packageJson.name,
         version: packageJson.version,
-        author,
+        authors: joinByCommaAnd(authors),
       }), '\n')
     }
   }
@@ -1800,7 +1841,7 @@ async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
         copyright: licenseText,
         packageName: packageJson.name,
         version: packageJson.version,
-        author,
+        authors: joinByCommaAnd(authors),
       }), '\n')
     }
   }
@@ -1812,7 +1853,7 @@ async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
         copyright: licenseText,
         packageName: packageJson.name,
         version: packageJson.version,
-        author,
+        authors: joinByCommaAnd(authors),
       }), '\n')
     }
   }
@@ -1897,14 +1938,33 @@ function urlJoin(base, ...segments) {
   return url
 }
 
-function generateJoinedLicenseText(templates, holder, year, packageJson) {
-  return templates.map(template => replacePlaceholdersWithValues(template, {
-    copyright: `Copyright (c) ${year} ${holder}`,
-    year,
-    packageName: packageJson.name,
-    version: packageJson.version,
-    author: holder,
-  })).join('\n\n\n')
+function generateJoinedLicenseText(templates, authors, year, packageJson) {
+  return templates.map(template => {
+    const authorsStr = joinByCommaAnd(authors.map(mapPersonInfoToName))
+
+    return replacePlaceholdersWithValues(template, {
+      copyright: `Copyright (c) ${year} ${authorsStr}`,
+      year,
+      packageName: packageJson.name,
+      version: packageJson.version,
+      authors: authorsStr,
+    })
+  }).join('\n\n\n')
+}
+
+function joinByCommaAnd(...values) {
+  if (!values) {
+    return ''
+  }
+
+  if (values.length === 1) {
+    return values[0]
+  }
+
+  const head = values.slice(0, values.length - 1)
+  const last = values[0]
+
+  return [head.join(', '), last].join(' and ')
 }
 
 exports.execute = execute
