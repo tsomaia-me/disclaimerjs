@@ -3,17 +3,17 @@ A CLI tool to bundle dependency licenses and notices into a single file.
 ## Installation
 Globally:
 
-    npm install -g disclaimerjs
+    npm install -g disclaim
 
 Locally (as a dev-dependency):
 
-    npm install --save-dev disclaimerjs
+    npm install --save-dev disclaim
 
 ## Usage
 
 Basic usage:
 
-    disclaimerjs --reporting --txt --remote="https://raw.githubusercontent.com/[repositoryOwner]/[repositoryName]/[branch]/[filePath]"
+    disclaim --reporting --txt --remote="https://raw.githubusercontent.com/[repositoryOwner]/[repositoryName]/[branch]/[filePath]"
 
 The command above would generate _ThirdPartyLicenses.txt_ file.
 
