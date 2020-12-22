@@ -1,7 +1,7 @@
 {
   "name": "disclaimerjs",
   "description": "A CLI tool to bundle dependency licenses and notices into a single file.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "license": "MIT-0",
   "type": "commonjs",
   "author": {
@@ -13,7 +13,7 @@
     "url": "https://gitlab.com/tsomaia.me/disclaimerjs.git"
   },
   "bin": {
-    "disclaimerjs": "./src/disclaimerjs.js"
+    "disclaimerjs": "./src/disclaimerjs"
   },
   "dependencies": {},
   "devDependencies": {}
