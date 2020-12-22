@@ -439,7 +439,7 @@ function normalizePackageInfos(packageInfos, context) {
   return packageInfos
     .map(packageInfo => {
       if (!packageInfo.licenseText && context.reporting) {
-        log(`No license text for ${id} (root: ${root})`)
+        log(`No license text for ${packageInfo.id} (root: ${packageInfo.path})`)
       }
 
       return normalizePackageInfo(packageInfo, context)
