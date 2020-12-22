@@ -15,14 +15,22 @@ const licenseTypeRegExp = /(apache|mit|isc|bsd)\s+license/i
 const supportedRepositories = new Set(['github.com', 'gitlab.com', 'bitbucket.org'])
 const branchVariants = ['master', 'main']
 const requestPromiseCache = {}
-const MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 1039
-const ISC_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 715
 const APACHE_2_0_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 547
+const ISC_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 696
+const MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 1022
+const MIT_0_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT = 857
 const licenseTemplatePaths = {
-  MIT: path.join(__dirname, 'templates/MIT.template'),
+  APACHE_2_0: path.join(__dirname, 'templates/Apache-2.0.template'),
+  CC_BY_3_0: path.join(__dirname, 'templates/CC-BY-3.0.template'),
   ISC: path.join(__dirname, 'templates/ISC.template'),
-  APACHE_2_0: path.join(__dirname, 'templates/APACHE-2.0.template'),
+  MIT: path.join(__dirname, 'templates/MIT.template'),
+  MIT_0: path.join(__dirname, 'templates/MIT-0.template'),
 }
+
+licenseTemplatePaths['Apache-2.0'] = licenseTemplatePaths.APACHE_2_0
+licenseTemplatePaths['APACHE-2.0'] = licenseTemplatePaths.APACHE_2_0
+licenseTemplatePaths['CC-BY-3.0'] = licenseTemplatePaths.CC_BY_3_0
+licenseTemplatePaths['MIT-0'] = licenseTemplatePaths.MIT_0
 
 const remoteLicenseFilePathVariants = [
   'LICENSE',
@@ -282,6 +290,7 @@ function formatPackageTxt({
   name,
   version,
   author,
+  contributors,
   repositoryUrl,
   licenseText,
   noticeText,
@@ -299,6 +308,10 @@ function formatPackageTxt({
 
   if (author) {
     result += `\nAuthor of the software: ${author}`
+  }
+
+  if (contributors && Array.isArray(contributors) && contributors.length > 0) {
+    result += `\nContributors:\n${contributors.join('\n')}\n`
   }
 
   if (licenseText || noticeText || thirdPartyNoticeText) {
@@ -355,6 +368,7 @@ function formatCsv(normalizedPackageInfos) {
     'name',
     'version',
     'author',
+    'contributors',
     'repositoryUrl',
     'licenseText',
     'noticeText',
@@ -362,17 +376,22 @@ function formatCsv(normalizedPackageInfos) {
   ]
 
   return [
-    headers.map(header => JSON.stringify(header)).join(','),
+    headers.map(mapToJsonString).join(','),
     ...normalizedPackageInfos.map(item => Object.values({
       name: JSON.stringify(item.name),
       version: JSON.stringify(item.version),
       author: JSON.stringify(item.author),
+      contributors: JSON.stringify(item.contributors.join('\n')),
       repositoryUrl: JSON.stringify(item.repositoryUrl),
       licenseText: JSON.stringify(item.licenseText),
       noticeText: JSON.stringify(item.noticeText),
       thirdPartyNoticeText: JSON.stringify(item.thirdPartyNoticeText),
     }).join(',')),
   ].join('\n')
+}
+
+function mapToJsonString(value) {
+  return JSON.stringify(value)
 }
 
 function normalizePackageInfos(packageInfos, context) {
@@ -385,6 +404,7 @@ function normalizePackageInfo({
   name,
   version,
   author,
+  contributors,
   licenseList,
   repositoryUrl,
   repositoryDirectory,
@@ -408,12 +428,17 @@ function normalizePackageInfo({
   return {
     name,
     version,
-    author: typeof author === 'object' ? author.name : author,
+    author: mapPersonInfoToName(author),
+    contributors: !contributors || !Array.isArray(contributors) ? [] : contributors.map(mapPersonInfoToName),
     repositoryUrl,
     licenseText,
     noticeText,
     thirdPartyNoticeText,
   }
+}
+
+function mapPersonInfoToName(info) {
+  return typeof info === 'object' ? info.name : info
 }
 
 /**
@@ -531,6 +556,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     license,
     licenses,
     author,
+    contributors,
     repository,
     homepage,
   } = packageJson
@@ -566,6 +592,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     name,
     version,
     author,
+    contributors: contributors && Array.isArray(contributors) ? contributors : [],
     license,
     licenses,
     licenseList,
@@ -1675,10 +1702,10 @@ async function resolveLicenseTextUsingReadme(readme) {
     return ''
   }
 
-  if (isPossiblyAnMITCopyright(licenseText)) {
+  if (isPossiblyAnApache2_0Copyright(licenseText)) {
     return {
       assembled: true,
-      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT), {
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.APACHE_2_0), {
         copyright: licenseText,
       }), '\n')
     }
@@ -1693,10 +1720,19 @@ async function resolveLicenseTextUsingReadme(readme) {
     }
   }
 
-  if (isPossiblyAnApache2_0Copyright(licenseText)) {
+  if (isPossiblyAnMITCopyright(licenseText)) {
     return {
       assembled: true,
-      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.APACHE_2_0), {
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT), {
+        copyright: licenseText,
+      }), '\n')
+    }
+  }
+
+  if (isPossiblyAnMIT0Copyright(licenseText)) {
+    return {
+      assembled: true,
+      text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT_0), {
         copyright: licenseText,
       }), '\n')
     }
@@ -1708,6 +1744,11 @@ async function resolveLicenseTextUsingReadme(readme) {
 function isPossiblyAnMITCopyright(text) {
   return text.toUpperCase().includes('MIT')
     && text.length < MIT_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
+}
+
+function isPossiblyAnMIT0Copyright(text) {
+  return (text.toUpperCase().includes('MIT-0') || text.toUpperCase().includes('MIT NO ATTRIBUTION'))
+    && text.length < MIT_0_LICENSE_APPROX_LENGTH_WITHOUT_COPYRIGHT
 }
 
 function isPossiblyAnISCCopyright(text) {
