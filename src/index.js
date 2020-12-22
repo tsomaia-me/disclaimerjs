@@ -231,16 +231,50 @@ async function generateBundle({
 
   const packageInfos = await resolvePackageInfos(packageJsonFiles, context)
 
-  await Promise.all([
-    writeJsonFile(cacheFilePath, packageInfos.reduce((record, packageInfo) => {
-      record[packageInfo.id] = packageInfo
+  const packageInfoMap = packageInfos.reduce((record, packageInfo) => {
+    if (record.hasOwnProperty(packageInfo.id)) {
+      const another = record[packageInfo.id]
 
-      return record
-    }, {})),
+      if (another.licenseText && !packageInfo.licenseText) {
+        return record
+      }
+
+      if (another.noticeText && !packageInfo.noticeText) {
+        return record
+      }
+
+      if (another.thirdPartyNoticeText && !packageInfo.thirdPartyNoticeText) {
+        return record
+      }
+
+      if (another.repositoryUrl && !packageInfo.repositoryUrl) {
+        return record
+      }
+
+      if (another.author && !packageInfo.author) {
+        return record
+      }
+
+      if (another.maintainers && !packageInfo.maintainers) {
+        return record
+      }
+
+      if (another.contributors && !packageInfo.contributors) {
+        return record
+      }
+    }
+
+    record[packageInfo.id] = packageInfo
+
+    return record
+  }, {})
+
+  await Promise.all([
+    writeJsonFile(cacheFilePath, packageInfoMap),
     writeJsonFile(packageJsonCacheFilePath, packageJsonCache),
   ])
 
-  const normalizedPackageInfos = normalizePackageInfos(packageInfos, context)
+  const normalizedPackageInfos = normalizePackageInfos(Object.values(packageInfoMap), context)
 
   if (json) {
     const outName = out ?? path.join(dir, 'ThirdPartyLicenses.json')
@@ -290,6 +324,7 @@ function formatPackageTxt({
   name,
   version,
   author,
+  maintainers,
   contributors,
   repositoryUrl,
   licenseText,
@@ -308,6 +343,10 @@ function formatPackageTxt({
 
   if (author) {
     result += `\nAuthor of the software: ${author}`
+  }
+
+  if (maintainers && Array.isArray(maintainers) && maintainers.length > 0) {
+    result += `\nMaintainers:\n${maintainers.join('\n')}\n`
   }
 
   if (contributors && Array.isArray(contributors) && contributors.length > 0) {
@@ -368,6 +407,7 @@ function formatCsv(normalizedPackageInfos) {
     'name',
     'version',
     'author',
+    'maintainers',
     'contributors',
     'repositoryUrl',
     'licenseText',
@@ -381,6 +421,7 @@ function formatCsv(normalizedPackageInfos) {
       name: JSON.stringify(item.name),
       version: JSON.stringify(item.version),
       author: JSON.stringify(item.author),
+      maintainers: JSON.stringify(item.maintainers.join('\n')),
       contributors: JSON.stringify(item.contributors.join('\n')),
       repositoryUrl: JSON.stringify(item.repositoryUrl),
       licenseText: JSON.stringify(item.licenseText),
@@ -396,7 +437,13 @@ function mapToJsonString(value) {
 
 function normalizePackageInfos(packageInfos, context) {
   return packageInfos
-    .map(packageInfo => normalizePackageInfo(packageInfo, context))
+    .map(packageInfo => {
+      if (!packageInfo.licenseText && context.reporting) {
+        log(`No license text for ${id} (root: ${root})`)
+      }
+
+      return normalizePackageInfo(packageInfo, context)
+    })
 }
 
 function normalizePackageInfo({
@@ -404,6 +451,7 @@ function normalizePackageInfo({
   name,
   version,
   author,
+  maintainers,
   contributors,
   licenseList,
   repositoryUrl,
@@ -429,6 +477,7 @@ function normalizePackageInfo({
     name,
     version,
     author: mapPersonInfoToName(author),
+    maintainers: !maintainers || !Array.isArray(maintainers) ? [] : maintainers.map(mapPersonInfoToName),
     contributors: !contributors || !Array.isArray(contributors) ? [] : contributors.map(mapPersonInfoToName),
     repositoryUrl,
     licenseText,
@@ -509,7 +558,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     if (cache.hasOwnProperty(id)) {
       const item = cache[id]
 
-      if (!item.assembled) {
+      if (!item.assembled && item.licenseText) {
         return item
       }
     }
@@ -547,6 +596,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
       ...await resolveContainerPackageJson(root, packageJson),
       ...remotePackageJson,
       ...packageJson,
+      version: remotePackageJson?.version || packageJson?.version,
     }
   }
 
@@ -556,6 +606,7 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
     license,
     licenses,
     author,
+    maintainers,
     contributors,
     repository,
     homepage,
@@ -583,15 +634,12 @@ async function resolvePackageInfo({ dirPath: root, packageJsonPath, packageJson 
   ])
   const licenseText = typeof licenseData === 'string' ? licenseData : licenseData.text
 
-  if (!licenseText && context.reporting) {
-    log(`No license text for ${id} (root: ${root})`)
-  }
-
   return {
     id: id === 'undefined@undefined' ? `undefined:${root}` : id,
     name,
     version,
     author,
+    maintainers: maintainers && Array.isArray(maintainers) ? maintainers : [],
     contributors: contributors && Array.isArray(contributors) ? contributors : [],
     license,
     licenses,
@@ -679,11 +727,12 @@ async function searchForRemoteLicenseText(context) {
   )
 }
 
-async function searchForLocalLicenseTextInReadme({ root }) {
+async function searchForLocalLicenseTextInReadme(context) {
   return await resolveLicenseTextUsingReadme(
     await resolveContent(
-      await searchForReadmeFiles(root)
-    )
+      await searchForReadmeFiles(context.root)
+    ),
+    context,
   )
 }
 
@@ -691,7 +740,7 @@ async function searchForRemotePackageJsonLicenseTextInReadme(context) {
   const packageJson = await resolveRemotePackageJson(context, true) // true means force-no-version
 
   if (packageJson?.readme) {
-    return await resolveLicenseTextUsingReadme(packageJson?.readme ?? '')
+    return await resolveLicenseTextUsingReadme(packageJson?.readme ?? '', context)
   }
 
   return null
@@ -703,7 +752,8 @@ async function searchForRemoteLicenseTextInReadme(context) {
       branchVariants,
       remoteReadmeFilePathVariants,
       context,
-    )
+    ),
+    context,
   )
 }
 
@@ -734,7 +784,7 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
 
   if (packageJson.author) {
     const authorName = typeof packageJson.author === 'object' ? packageJson.author.name : packageJson.author
-    licenseText = generateJoinedLicenseText(templates, authorName, fullYear)
+    licenseText = generateJoinedLicenseText(templates, authorName, fullYear, packageJson)
 
     if (licenseText && reporting) {
       log(`Auto-generated COPYRIGHT notice for ${id} using AUTHOR NAME and CURRENT YEAR`)
@@ -742,7 +792,7 @@ async function assembleLicenseText({ id, repositoryUrl, packageJson, licenseList
   } else if (repositoryUrl) {
     const { path: repositoryPath } = parseUrl(repositoryUrl)
     const [owner] = trimLeft(repositoryPath, '/').split('/')
-    licenseText = generateJoinedLicenseText(templates, owner, fullYear)
+    licenseText = generateJoinedLicenseText(templates, owner, fullYear, packageJson)
 
     if (licenseText && reporting) {
       log(`Auto-generated COPYRIGHT notice for ${id} using REPOSITORY OWNER and CURRENT YEAR`)
@@ -826,7 +876,7 @@ async function searchForContainerThirdPartyNoticeText(context) {
 
 
 
-async function resolvePackageJson(context, forceNoVersion) {
+async function resolvePackageJson(context, forceNoVersion = false) {
   const cachedPackageJson = resolveCachedPackageJson(context)
 
   if (cachedPackageJson) {
@@ -1378,14 +1428,21 @@ async function searchForContent(context, resolvers) {
 }
 
 async function resolveContainerPackageJson(root, packageJson) {
-  const variants = [packageJson.main, packageJson.module]
+  const variants = [
+    packageJson.main,
+    packageJson.module,
+    packageJson.types,
+    packageJson.typings,
+    packageJson.esnext,
+    packageJson.es2015,
+  ].sort()
 
   for (const variant of variants) {
     if (variant && typeof variant === 'string') {
       const dotPath = extractDotPath(variant)
 
       if (!dotPath || dotPath === '.' || dotPath === './') {
-        return ''
+        continue
       }
 
       const targetPath = path.join(root, dotPath)
@@ -1413,14 +1470,21 @@ async function searchForContainerContent(resolver, {
   reporting,
   packageJsonCache,
 }) {
-  const variants = [packageJson.main, packageJson.module]
+  const variants = [
+    packageJson.main,
+    packageJson.module,
+    packageJson.types,
+    packageJson.typings,
+    packageJson.esnext,
+    packageJson.es2015,
+  ].sort()
 
   for (const variant of variants) {
     if (variant && typeof variant === 'string') {
       const dotPath = extractDotPath(variant)
 
       if (!dotPath || dotPath === '.' || dotPath === './') {
-        return ''
+        continue
       }
 
       const targetPath = path.join(root, dotPath)
@@ -1690,9 +1754,10 @@ function parseArguments(args) {
  *
  * @param {string} readme
  *
+ * @param packageJson
  * @returns {Promise<string>}
  */
-async function resolveLicenseTextUsingReadme(readme) {
+async function resolveLicenseTextUsingReadme(readme, { packageJson }) {
   const licenseText = readme
     ?.split(readmeLicenseStartRegex)[1]
     ?.split(readmeLicenseEndRegex)[0]
@@ -1702,11 +1767,16 @@ async function resolveLicenseTextUsingReadme(readme) {
     return ''
   }
 
+  const author = typeof packageJson.author === 'object' ? packageJson.author.name : packageJson.author
+
   if (isPossiblyAnApache2_0Copyright(licenseText)) {
     return {
       assembled: true,
       text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.APACHE_2_0), {
         copyright: licenseText,
+        packageName: packageJson.name,
+        version: packageJson.version,
+        author,
       }), '\n')
     }
   }
@@ -1716,6 +1786,9 @@ async function resolveLicenseTextUsingReadme(readme) {
       assembled: true,
       text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.ISC), {
         copyright: licenseText,
+        packageName: packageJson.name,
+        version: packageJson.version,
+        author,
       }), '\n')
     }
   }
@@ -1725,6 +1798,9 @@ async function resolveLicenseTextUsingReadme(readme) {
       assembled: true,
       text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT), {
         copyright: licenseText,
+        packageName: packageJson.name,
+        version: packageJson.version,
+        author,
       }), '\n')
     }
   }
@@ -1734,6 +1810,9 @@ async function resolveLicenseTextUsingReadme(readme) {
       assembled: true,
       text: trim(replacePlaceholdersWithValues(await readFile(licenseTemplatePaths.MIT_0), {
         copyright: licenseText,
+        packageName: packageJson.name,
+        version: packageJson.version,
+        author,
       }), '\n')
     }
   }
@@ -1818,9 +1897,13 @@ function urlJoin(base, ...segments) {
   return url
 }
 
-function generateJoinedLicenseText(templates, holder, year) {
+function generateJoinedLicenseText(templates, holder, year, packageJson) {
   return templates.map(template => replacePlaceholdersWithValues(template, {
-    copyright: `Copyright (c) ${year} ${holder}`
+    copyright: `Copyright (c) ${year} ${holder}`,
+    year,
+    packageName: packageJson.name,
+    version: packageJson.version,
+    author: holder,
   })).join('\n\n\n')
 }
 

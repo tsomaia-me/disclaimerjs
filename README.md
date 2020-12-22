@@ -60,6 +60,8 @@ For more detailed API explanation, see API section.
                 "name": "",
                 "version": "",
                 "author": "",
+                "maintainers": [],
+                "contributors": [],
                 "repositoryUrl": "",
                 "licenseText": "",
                 "noticeText": "",
@@ -69,9 +71,9 @@ For more detailed API explanation, see API section.
 
 - --csv - (optional) Output data as csv (the default is false):
           
-      "name","version","author","repositoryUrl","licenseText","noticeText","thirdPartyNoticeText"
-      "","","","","","",""
-      
+      "name","version","author","maintainers","contributors","repositoryUrl","licenseText","noticeText","thirdPartyNoticeText"
+      "","","","","","","","",""
+
 - --txt - (optional) Output data as text (.txt) (the default is true).
 
 - --prepend - (optional) (only for --text) Can be used to specify file name/path
