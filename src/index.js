@@ -645,7 +645,7 @@ async function searchForLicenseText(context) {
 }
 
 async function searchForCachedLicenseText({ id, assembled, cache }) {
-  if (!assembled && cache.hasOwnProperty(id)) {
+  if (!assembled && cache.hasOwnProperty(id) && cache[id].licenseText) {
     return cache[id].licenseText
   }
 
